@@ -1,27 +1,70 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { createClientBrowser } from "@/lib/supabaseClient";
+import { useSearchParams } from "next/navigation";
+
+type Profile = { id: string; full_name: string | null; email: string | null };
 
 export default function NewJobPage() {
   const supabase = createClientBrowser();
+  const searchParams = useSearchParams();
+  const preSelectedSub = searchParams.get("subId");
+
+  const [subs, setSubs] = useState<Profile[]>([]);
+  const [subsQuery, setSubsQuery] = useState("");
+  const [meId, setMeId] = useState<string | null>(null);
+
   const [form, setForm] = useState({
     title: "",
     school: "",
     notes: "",
     start_date: "",
     end_date: "",
+    requested_sub: preSelectedSub ?? "",
   });
+
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
       const { data: session } = await supabase.auth.getSession();
-      if (!session.session) {
+      const user = session.session?.user;
+      if (!user) {
         window.location.href = "/login";
         return;
       }
+      setMeId(user.id);
+
+      // Load all profiles so principal can choose any sub
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id, full_name, email");
+
+      if (!error && data) {
+        // Hide myself from the list
+        const list = (data as Profile[]).filter((p) => p.id !== user.id);
+        setSubs(list);
+      }
     })();
   }, [supabase]);
+
+  const filteredSubs = useMemo(() => {
+    const q = subsQuery.trim().toLowerCase();
+    if (!q) return subs;
+    return subs.filter((s) => {
+      const name = (s.full_name ?? "").toLowerCase();
+      const email = (s.email ?? "").toLowerCase();
+      return name.includes(q) || email.includes(q);
+    });
+  }, [subs, subsQuery]);
+
+  const selectSub = (p: Profile) => {
+    setForm((f) => ({ ...f, requested_sub: p.id }));
+  };
+
+  const clearSub = () => {
+    setForm((f) => ({ ...f, requested_sub: "" }));
+  };
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,10 +75,12 @@ export default function NewJobPage() {
     } = await supabase.auth.getUser();
 
     if (!user) {
-      alert("You must be logged in to create a job.");
+      alert("You must be logged in.");
       setBusy(false);
       return;
     }
+
+    const willRequest = !!form.requested_sub;
 
     const { error } = await supabase.from("jobs").insert({
       title: form.title,
@@ -44,87 +89,177 @@ export default function NewJobPage() {
       start_date: form.start_date || null,
       end_date: form.end_date || null,
       created_by: user.id,
-      status: "open", // <-- NEW
+      requested_sub: form.requested_sub || null,
+      status: willRequest ? "requested" : "open",
     });
 
     setBusy(false);
 
     if (error) {
-      alert("Error creating job: " + error.message);
+      alert("Error creating booking: " + error.message);
     } else {
-      window.location.href = "/jobs";
+      window.location.href = "/principal/bookings";
     }
   };
 
-  return (
-    <div className="min-h-screen grid place-items-center p-6">
-      <form
-        onSubmit={onSubmit}
-        className="max-w-md w-full border rounded-xl p-6 space-y-3"
-      >
-        <h1 className="text-2xl font-bold">Create New Job</h1>
-
-        {/* Job Title */}
-        <label className="block text-sm font-medium">Title</label>
-        <input
-          className="w-full border rounded p-2"
-          placeholder="Title"
-          value={form.title}
-          onChange={(e) => setForm({ ...form, title: e.target.value })}
-          required
-        />
-
-        {/* School */}
-        <label className="block text-sm font-medium">School</label>
-        <input
-          className="w-full border rounded p-2"
-          placeholder="School"
-          value={form.school}
-          onChange={(e) => setForm({ ...form, school: e.target.value })}
-        />
-
-        {/* Start Date */}
-        <label className="block text-sm font-medium">Start Date</label>
-        <input
-          type="date"
-          className="w-full border rounded p-2"
-          value={form.start_date}
-          onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-          required
-        />
-
-        {/* End Date */}
-        <label className="block text-sm font-medium">End Date</label>
-        <input
-          type="date"
-          className="w-full border rounded p-2"
-          value={form.end_date}
-          onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-          required
-        />
-
-        {/* Notes */}
-        <label className="block text-sm font-medium">Notes</label>
-        <textarea
-          className="w-full border rounded p-2"
-          placeholder="Notes (optional)"
-          rows={4}
-          value={form.notes}
-          onChange={(e) => setForm({ ...form, notes: e.target.value })}
-        />
-
-        <div className="flex items-center gap-3">
-          <button
-            disabled={busy}
-            className="border rounded p-2 px-4 font-medium"
-          >
-            {busy ? "Creating…" : "Create Job"}
-          </button>
-          <a href="/jobs" className="underline">
-            Cancel
-          </a>
+  const SelectedSubBadge = () => {
+    if (!form.requested_sub) return null;
+    const who = subs.find((s) => s.id === form.requested_sub);
+    if (!who) return null;
+    return (
+      <div className="flex items-center justify-between rounded-lg border p-2 text-sm">
+        <div>
+          <div className="font-medium">{who.full_name ?? "Unnamed User"}</div>
+          <div className="opacity-80">{who.email ?? who.id}</div>
         </div>
-      </form>
+        <button
+          type="button"
+          className="underline ml-3"
+          onClick={clearSub}
+          title="Remove selected sub"
+        >
+          Clear
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen p-4 md:p-6 max-w-6xl mx-auto">
+      <h1 className="text-2xl font-bold mb-4">Create New Booking</h1>
+
+      {/* Two-column layout on desktop, stacked on mobile */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Left: Booking form (spans 2 columns on desktop) */}
+        <div className="md:col-span-2">
+          <form
+            onSubmit={onSubmit}
+            className="border rounded-xl p-6 space-y-3"
+          >
+            <label className="block text-sm font-medium">Title</label>
+            <input
+              className="w-full border rounded p-2"
+              placeholder="e.g., 5th Class Cover"
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              required
+            />
+
+            <label className="block text-sm font-medium">School</label>
+            <input
+              className="w-full border rounded p-2"
+              placeholder="School"
+              value={form.school}
+              onChange={(e) => setForm({ ...form, school: e.target.value })}
+            />
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium">Start Date</label>
+                <input
+                  type="date"
+                  className="w-full border rounded p-2"
+                  value={form.start_date}
+                  onChange={(e) =>
+                    setForm({ ...form, start_date: e.target.value })
+                  }
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">End Date</label>
+                <input
+                  type="date"
+                  className="w-full border rounded p-2"
+                  value={form.end_date}
+                  onChange={(e) =>
+                    setForm({ ...form, end_date: e.target.value })
+                  }
+                  required
+                />
+              </div>
+            </div>
+
+            <label className="block text-sm font-medium">Notes</label>
+            <textarea
+              className="w-full border rounded p-2"
+              placeholder="Notes (optional)"
+              rows={4}
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+            />
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium">
+                Selected substitute (optional)
+              </div>
+              <SelectedSubBadge />
+              {!form.requested_sub && (
+                <p className="text-xs opacity-70">
+                  If none selected, the booking will be posted as <b>open</b>.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                disabled={busy}
+                className="border rounded p-2 px-4 font-medium"
+              >
+                {busy ? "Creating…" : "Create Booking"}
+              </button>
+              <a href="/principal" className="underline">
+                Cancel
+              </a>
+            </div>
+          </form>
+        </div>
+
+        {/* Right: Sub list / selector */}
+        <aside className="md:col-span-1 border rounded-xl p-4 h-fit">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-semibold">Substitutes</h2>
+            <a href="/principal/subs" className="underline text-xs">
+              View all
+            </a>
+          </div>
+
+          <input
+            className="w-full border rounded p-2 mb-3"
+            placeholder="Search name or email…"
+            value={subsQuery}
+            onChange={(e) => setSubsQuery(e.target.value)}
+          />
+
+          <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
+            {filteredSubs.length === 0 && (
+              <div className="text-sm opacity-70">No matching substitutes.</div>
+            )}
+
+            {filteredSubs.map((s) => {
+              const isSelected = form.requested_sub === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => selectSub(s)}
+                  className={`w-full text-left border rounded-lg p-2 ${
+                    isSelected ? "ring-2 ring-blue-500" : "hover:bg-gray-50"
+                  }`}
+                  title="Pick this substitute"
+                >
+                  <div className="font-medium text-sm">
+                    {s.full_name ?? "Unnamed User"}
+                  </div>
+                  <div className="text-xs opacity-80">
+                    {s.email ?? s.id}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }
