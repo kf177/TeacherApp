@@ -1,45 +1,136 @@
+// app/principal/login/page.tsx
 "use client";
-import { useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClientBrowser } from "@/lib/supabaseClient";
+
+type Role = "principal" | "teacher";
 
 export default function PrincipalLogin() {
   const supabase = createClientBrowser();
+  const router = useRouter();
+
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  const siteUrl = useMemo(() => {
+    const base = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+    return base.replace(/\/+$/, "");
+  }, []);
+
+  const getMyRole = async (): Promise<Role | null> => {
+    const { data: sess } = await supabase.auth.getSession();
+    const uid = sess.session?.user.id;
+    if (!uid) return null;
+
+    const { data: prof, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", uid)
+      .maybeSingle<{ role: Role | string | null }>();
+
+    if (error) return null;
+    const role =
+      typeof prof?.role === "string"
+        ? (prof.role.trim().toLowerCase() as Role)
+        : null;
+    return role ?? null;
+  };
+
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT") {
+        setErr(null);
+        setInfo(null);
+      }
+    });
+    return () => sub.subscription.unsubscribe();
+  }, [supabase]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setBusy(true);
+    setErr(null);
+    setInfo(null);
 
     try {
       if (mode === "signin") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-      } else {
-        // Sign up new principal
-        const { data, error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        const userId = data.user?.id;
-        if (userId) {
-          // ensure profile exists and set role=principal
-          await supabase.from("profiles").upsert({ id: userId, email, role: "principal" }, { onConflict: "id" });
+
+        const role = await getMyRole();
+
+        if (role === "principal") {
+          setBusy(false);
+          router.replace("/principal");
+          return;
         }
+
+        if (role === "teacher") {
+          await supabase.auth.signOut();
+          setErr("This portal is for principals only. Please use the Teacher login.");
+          setBusy(false);
+          return;
+        }
+
+        await supabase.auth.signOut();
+        setInfo("Your account is awaiting activation (no principal profile found). Please contact an admin.");
+        setBusy(false);
+        return;
       }
 
-      // after auth, set role to principal (idempotent) and go to Principal Home
-      const { data: u } = await supabase.auth.getUser();
-      const uid = u.user?.id;
-      if (uid) {
-        await supabase.from("profiles").upsert({ id: uid, email, role: "principal" }, { onConflict: "id" });
+      // --- SIGNUP branch ---
+      const { error: upErr } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: `${siteUrl}/principal/login` },
+      });
+      if (upErr) throw upErr;
+
+      const { data: sess } = await supabase.auth.getSession();
+      if (!sess.session) {
+        setInfo("Account created. Check your email to confirm, then sign in here.");
+        setMode("signin");
+        setBusy(false);
+        return;
       }
-      window.location.href = "/principal";
+
+      const role = await getMyRole();
+      if (role === "principal") {
+        setBusy(false);
+        router.replace("/principal");
+        return;
+      }
+
+      await supabase.auth.signOut();
+      setInfo("Signed up, but your principal profile isn’t active yet. Please contact an admin.");
+      setBusy(false);
+      return;
     } catch (err: any) {
-      alert(err.message ?? "Authentication failed");
-    } finally {
+      const msg = (err?.message ?? "Authentication failed").toString();
+      if (msg.toLowerCase().includes("already")) {
+        setErr("This email is already registered. Switch to Sign in.");
+        setMode("signin");
+      } else {
+        setErr(msg);
+      }
       setBusy(false);
     }
+  };
+
+  const resetPassword = async () => {
+    if (!email) return alert("Enter your email first.");
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${siteUrl}/principal/login`,
+    });
+    if (error) alert(error.message);
+    else alert("Password reset email sent.");
   };
 
   return (
@@ -48,6 +139,9 @@ export default function PrincipalLogin() {
         <h1 className="text-2xl font-bold">
           {mode === "signin" ? "Principal Sign in" : "Create Principal Account"}
         </h1>
+
+        {err && <div className="p-2 text-sm border rounded bg-red-50">{err}</div>}
+        {info && <div className="p-2 text-sm border rounded bg-yellow-50">{info}</div>}
 
         <label className="block text-sm font-medium">Email</label>
         <input
@@ -92,7 +186,9 @@ export default function PrincipalLogin() {
         </div>
 
         <div className="text-xs opacity-70 text-center">
-          <a href="/login" className="underline">Use magic link instead</a>
+          <button type="button" onClick={resetPassword} className="underline">
+            Forgot password?
+          </button>
         </div>
       </form>
     </div>

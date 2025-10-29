@@ -1,68 +1,148 @@
+// app/teacher/login/page.tsx
 "use client";
-import { useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClientBrowser } from "@/lib/supabaseClient";
+
+type Role = "principal" | "teacher";
 
 export default function TeacherLogin() {
   const supabase = createClientBrowser();
+  const router = useRouter();
+
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  const siteUrl = useMemo(() => {
+    const base = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+    return base.replace(/\/+$/, "");
+  }, []);
+
+  const getMyRole = async (): Promise<Role | null> => {
+    const { data: sess } = await supabase.auth.getSession();
+    const uid = sess.session?.user.id;
+    if (!uid) return null;
+
+    const { data: prof, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", uid)
+      .maybeSingle<{ role: Role | string | null }>();
+
+    if (error) return null;
+    const role =
+      typeof prof?.role === "string"
+        ? (prof.role.trim().toLowerCase() as Role)
+        : null;
+    return role ?? null;
+  };
+
+  // Don’t auto-redirect on auth events; just clear messages
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT") {
+        setErr(null);
+        setInfo(null);
+      }
+    });
+    return () => sub.subscription.unsubscribe();
+  }, [supabase]);
 
   const submit = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setBusy(true);
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    setInfo(null);
 
-  try {
-    if (mode === "signin") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-    } else {
-      // Sign up as teacher (sub)
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { emailRedirectTo: "http://localhost:3000/teacher/login" },
-      });
-      if (error) {
-        // Friendly handling for already-registered users
-        if (
-          error.message?.toLowerCase().includes("already registered") ||
-          error.message?.toLowerCase().includes("user already exists")
-        ) {
-          alert("This email is already registered. Switching to Sign in.");
-          setMode("signin");
+    try {
+      if (mode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+
+        const role = await getMyRole();
+
+        if (role === "teacher") {
+          setBusy(false);
+          router.replace("/teacher");
           return;
         }
-        throw error;
+
+        if (role === "principal") {
+          // Signed in but wrong portal → sign out and show message
+          await supabase.auth.signOut();
+          setErr("This portal is for teachers only. Please use the Principal login.");
+          setBusy(false);
+          return;
+        }
+
+        // No profile row / no role yet — do NOT loop
+        await supabase.auth.signOut();
+        setInfo("Your account is awaiting activation (no teacher profile found). Please contact an admin.");
+        setBusy(false);
+        return;
       }
-    }
 
-    // After successful sign-in only (we should have a session now)
-    const { data: sess } = await supabase.auth.getSession();
-    if (!sess.session) {
-      // No session yet (e.g., email confirmation required or a provider mismatch)
-      alert("Account created. Please sign in now.");
-      setMode("signin");
+      // --- SIGNUP branch ---
+      const { error: upErr } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: `${siteUrl}/teacher/login` },
+      });
+      if (upErr) throw upErr;
+
+      // If email confirm is enabled, there won’t be a session yet
+      const { data: sess } = await supabase.auth.getSession();
+      if (!sess.session) {
+        setInfo("Account created. Check your email to confirm, then sign in here.");
+        setMode("signin");
+        setBusy(false);
+        return;
+      }
+
+      // Optional: auto-create a teacher profile row (requires INSERT policy)
+      // const { error: insErr } = await supabase.from("profiles").insert({
+      //   id: sess.session.user.id,
+      //   role: "teacher",
+      // });
+      // if (insErr) { /* ignore, admin might provision */ }
+
+      const role = await getMyRole();
+      if (role === "teacher") {
+        setBusy(false);
+        router.replace("/teacher");
+        return;
+      }
+
+      await supabase.auth.signOut();
+      setInfo("Signed up, but your teacher profile isn’t active yet. Please contact an admin.");
+      setBusy(false);
       return;
+    } catch (err: any) {
+      const msg = (err?.message ?? "Authentication failed").toString();
+      if (msg.toLowerCase().includes("already")) {
+        setErr("This email is already registered. Switch to Sign in.");
+        setMode("signin");
+      } else {
+        setErr(msg);
+      }
+      setBusy(false);
     }
+  };
 
-    // Ensure profiles row has role=sub (idempotent)
-    const uid = sess.session.user.id;
-    await supabase.from("profiles").upsert(
-      { id: uid, email, role: "sub" },
-      { onConflict: "id" }
-    );
-
-    // Go to teacher home
-    window.location.href = "/teacher";
-  } catch (err: any) {
-    alert(err?.message ?? "Authentication failed");
-  } finally {
-    setBusy(false);
-  }
-};
-
+  const resetPassword = async () => {
+    if (!email) return alert("Enter your email first.");
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${siteUrl}/teacher/login`,
+    });
+    if (error) alert(error.message);
+    else alert("Password reset email sent.");
+  };
 
   return (
     <div className="min-h-screen grid place-items-center p-6">
@@ -70,6 +150,9 @@ export default function TeacherLogin() {
         <h1 className="text-2xl font-bold">
           {mode === "signin" ? "Teacher Sign in" : "Create Teacher Account"}
         </h1>
+
+        {err && <div className="p-2 text-sm border rounded bg-red-50">{err}</div>}
+        {info && <div className="p-2 text-sm border rounded bg-yellow-50">{info}</div>}
 
         <label className="block text-sm font-medium">Email</label>
         <input
@@ -114,7 +197,9 @@ export default function TeacherLogin() {
         </div>
 
         <div className="text-xs opacity-70 text-center">
-          <a href="/login" className="underline">Use magic link instead</a>
+          <button type="button" onClick={resetPassword} className="underline">
+            Forgot password?
+          </button>
         </div>
       </form>
     </div>

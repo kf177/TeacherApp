@@ -1,63 +1,146 @@
+// C:\Projects\TeacherApp\apps\web\src\app\RoleGate.tsx
 "use client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClientBrowser } from "@/lib/supabaseClient";
 
-type Profile = { id: string; role: "principal" | "sub" | null };
+type Role = "principal" | "teacher";
+type Profile = { id: string; role: Role | string | null };
+
+type GateStatus = "loading" | "ok" | "mismatch" | "noauth";
 
 export default function RoleGate({
   want,
   children,
-  loginPath = "/login",   // 👈 add this default
+  loginPath = "/login",
+  debug = false,
 }: {
-  want: "principal" | "sub";
+  want: Role | Role[];
   children: React.ReactNode;
-  loginPath?: string;      // 👈 and this prop
+  loginPath?: string;
+  debug?: boolean;
 }) {
   const supabase = createClientBrowser();
-  const [status, setStatus] = useState<"loading"|"ok"|"mismatch"|"noauth">("loading");
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const router = useRouter();
+  const [status, setStatus] = useState<GateStatus>("loading");
+
+  const allowed: Role[] = useMemo(() => {
+    const raw = Array.isArray(want) ? want : [want];
+    const norm = raw
+      .map((r) => (typeof r === "string" ? (r.trim().toLowerCase() as Role) : r))
+      .filter(Boolean) as Role[];
+    const valid: Role[] = ["principal", "teacher"];
+    return norm.filter((r) => valid.includes(r));
+  }, [want]);
+  const allowedKey = useMemo(() => JSON.stringify(allowed), [allowed]);
 
   useEffect(() => {
-    (async () => {
-      const { data: session } = await supabase.auth.getSession();
-      if (!session.session) { setStatus("noauth"); return; }
-      const me = session.session.user.id;
+    let mounted = true;
+    const ac = new AbortController();
 
-      const { data } = await supabase
-        .from("profiles")
-        .select("id, role")
-        .eq("id", me)
-        .maybeSingle();
+    const check = async () => {
+      try {
+        const { data: sessionRes, error: sessionErr } = await supabase.auth.getSession();
+        if (!mounted || ac.signal.aborted) return;
 
-      if (!data) { setStatus("mismatch"); return; }
-      setProfile(data as Profile);
+        if (sessionErr || !sessionRes.session) {
+          // Not signed in → send to the correct login for this section
+          setStatus("noauth");
+          if (debug) console.log("[RoleGate] no session (or err), redirecting to loginPath");
+          return;
+        }
 
-      if ((data.role ?? null) === want) setStatus("ok");
-      else setStatus("mismatch");
-    })();
-  }, [supabase, want]);
+        const uid = sessionRes.session.user.id;
 
-  const switchRole = async () => {
-    if (!profile) return;
-    const { error } = await supabase.from("profiles").update({ role: want }).eq("id", profile.id);
-    if (error) return alert("Could not set role: " + error.message);
-    window.location.reload();
-  };
+        const { data: prof, error: profErr } = await supabase
+          .from("profiles")
+          .select("id, role")
+          .eq("id", uid)
+          .maybeSingle<Profile>();
 
-  if (status === "loading") return <div className="p-6 opacity-70">Checking access…</div>;
-  if (status === "noauth") { window.location.href = loginPath; return null; }
+        if (!mounted || ac.signal.aborted) return;
+
+        if (debug) {
+          console.log(
+            "[RoleGate debug]",
+            JSON.stringify(
+              {
+                path: typeof window !== "undefined" ? window.location.pathname : "",
+                uid,
+                prof,
+                profErr: profErr
+                  ? {
+                      message: profErr.message,
+                      details: (profErr as any).details,
+                      hint: (profErr as any).hint,
+                      code: (profErr as any).code,
+                    }
+                  : null,
+                allowed,
+              },
+              null,
+              2
+            )
+          );
+        }
+
+        if (profErr || !prof) {
+          // Could be RLS blocked or profile not created yet.
+          // Treat as unauthenticated so we redirect to the *correct* login.
+          setStatus("noauth");
+          return;
+        }
+
+        const role =
+          typeof prof.role === "string" ? (prof.role.trim().toLowerCase() as Role) : null;
+
+        if (role && allowed.includes(role)) {
+          setStatus("ok");
+        } else {
+          // Signed in but wrong role → show Access denied
+          setStatus("mismatch");
+        }
+      } catch (e) {
+        if (!mounted || ac.signal.aborted) return;
+        if (debug) console.error("[RoleGate] unexpected error:", e);
+        // Be kind: send to login of this section
+        setStatus("noauth");
+      }
+    };
+
+    check();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      if (!ac.signal.aborted) check();
+    });
+
+    return () => {
+      mounted = false;
+      ac.abort();
+      sub.subscription.unsubscribe();
+    };
+  }, [supabase, allowedKey, debug]);
+
+  useEffect(() => {
+    if (status === "noauth") {
+      // Always send to the correct login for this section
+      router.replace(loginPath);
+    }
+  }, [status, router, loginPath]);
+
+  if (status === "loading" || status === "noauth") {
+    return <div className="p-6 text-sm opacity-70">Checking access…</div>;
+  }
 
   if (status === "mismatch") {
     return (
       <div className="min-h-screen grid place-items-center p-6">
         <div className="max-w-md w-full border rounded-xl p-6 space-y-3">
-          <h2 className="text-lg font-semibold">Switch role?</h2>
-          <p className="text-sm opacity-80">This area is for <b>{want}</b>s. Set your role to continue.</p>
+          <h2 className="text-lg font-semibold">Access denied</h2>
+          <p className="text-sm opacity-80">Your account doesn’t have access to this area.</p>
           <div className="flex gap-3">
-            <button onClick={switchRole} className="border rounded px-4 py-2 text-sm font-medium">
-              Set role to “{want}”
-            </button>
-            <a href="/" className="underline text-sm self-center">Go back</a>
+            <a href="/" className="underline text-sm">Go Home</a>
           </div>
         </div>
       </div>
