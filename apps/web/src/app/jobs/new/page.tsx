@@ -1,15 +1,16 @@
+// C:\Projects\TeacherApp\apps\web\src\app\jobs\new\page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { createClientBrowser } from "@/lib/supabaseClient";
 import { useSearchParams } from "next/navigation";
+import RoleGate from "@/app/RoleGate"; // gate for principal
 
 type Profile = {
   id: string;
   full_name: string | null;
   email: string | null;
   role?: string | null;
-  // we don’t need private fields for the list
 };
 
 type PublicTeacher = {
@@ -20,11 +21,10 @@ type PublicTeacher = {
   county: string | null;
 };
 
-export default function NewJobPage() {
+function NewJobInner() {
   const supabase = createClientBrowser();
   const searchParams = useSearchParams();
 
-  // Prefer teacherId; keep subId for legacy deep links
   const preSelectedTeacher =
     searchParams.get("teacherId") ?? searchParams.get("subId") ?? "";
 
@@ -40,7 +40,7 @@ export default function NewJobPage() {
     notes: "",
     start_date: "",
     end_date: "",
-    requested_teacher: preSelectedTeacher, // canonical field
+    requested_teacher: preSelectedTeacher,
   });
 
   // Modal state (profile preview)
@@ -49,7 +49,6 @@ export default function NewJobPage() {
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
 
-  // Sync initial query param if nothing selected yet
   useEffect(() => {
     if (preSelectedTeacher && !form.requested_teacher) {
       setForm((f) => ({ ...f, requested_teacher: preSelectedTeacher }));
@@ -57,7 +56,7 @@ export default function NewJobPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preSelectedTeacher]);
 
-  // Load teachers only (role='teacher')
+  // Load teachers via RPC (principal-safe)
   useEffect(() => {
     (async () => {
       setLoadingTeachers(true);
@@ -66,26 +65,19 @@ export default function NewJobPage() {
       const { data: session } = await supabase.auth.getSession();
       const user = session.session?.user;
       if (!user) {
-        window.location.href = "/login";
+        window.location.href = "/principal/login";
         return;
       }
 
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("id, full_name, email, role")
-        .eq("role", "teacher")
-        .neq("id", user.id)
-        .order("full_name", { ascending: true, nullsFirst: true })
-        .order("email", { ascending: true, nullsFirst: true });
-
+      const { data, error } = await supabase.rpc("get_teachers_for_principal");
       if (error) {
-        console.error("profiles select error:", error);
+        console.error("get_teachers_for_principal error:", error);
         setTeachersError(error.message);
         setTeachers([]);
       } else {
-        setTeachers((data ?? []) as Profile[]);
+        const list = (data ?? []).filter((t: any) => t.id !== user.id);
+        setTeachers(list as Profile[]);
       }
-
       setLoadingTeachers(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -101,24 +93,33 @@ export default function NewJobPage() {
     });
   }, [teachers, teachersQuery]);
 
-  // Open modal and load a public subset of the teacher profile
+  // Preview panel (pull from a restricted view)
   const openPreview = async (teacherId: string) => {
     setPreviewId(teacherId);
     setPreview(null);
     setPreviewErr(null);
     setLoadingPreview(true);
 
-    // Prefer a privacy-safe view if you create it (see SQL below)
-    // Falls back to profiles with limited columns if view not present
-    const { data, error } =
-      await supabase
-        .from("profiles_public") // <- create this view per SQL below
+    // Prefer privacy-safe view
+    let { data, error } = await supabase
+      .from("profiles_public")
+      .select("id, full_name, email, avatar_url, county")
+      .eq("id", teacherId)
+      .maybeSingle();
+
+    // Fallback: if view not present, read limited columns from profiles (requires policy)
+    if (error) {
+      const fb = await supabase
+        .from("profiles")
         .select("id, full_name, email, avatar_url, county")
         .eq("id", teacherId)
         .maybeSingle();
+      data = fb.data;
+      error = fb.error || null;
+    }
 
     if (error) {
-      console.error("profiles_public select error:", error);
+      console.error("teacher preview error:", error);
       setPreviewErr(error.message);
       setPreview(null);
     } else if (data) {
@@ -138,9 +139,7 @@ export default function NewJobPage() {
   };
 
   const selectFromPreview = () => {
-    if (previewId) {
-      setForm((f) => ({ ...f, requested_teacher: previewId }));
-    }
+    if (previewId) setForm((f) => ({ ...f, requested_teacher: previewId }));
     closePreview();
   };
 
@@ -210,7 +209,6 @@ export default function NewJobPage() {
     <div className="min-h-screen p-4 md:p-6 max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold mb-4">Create New Booking</h1>
 
-      {/* Layout */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Left: Booking form */}
         <div className="md:col-span-2">
@@ -239,9 +237,7 @@ export default function NewJobPage() {
                   type="date"
                   className="w-full border rounded p-2"
                   value={form.start_date}
-                  onChange={(e) =>
-                    setForm({ ...form, start_date: e.target.value })
-                  }
+                  onChange={(e) => setForm({ ...form, start_date: e.target.value })}
                   required
                 />
               </div>
@@ -251,9 +247,7 @@ export default function NewJobPage() {
                   type="date"
                   className="w-full border rounded p-2"
                   value={form.end_date}
-                  onChange={(e) =>
-                    setForm({ ...form, end_date: e.target.value })
-                  }
+                  onChange={(e) => setForm({ ...form, end_date: e.target.value })}
                   required
                 />
               </div>
@@ -353,13 +347,7 @@ export default function NewJobPage() {
       {/* Modal: Teacher profile preview */}
       {previewId && (
         <div className="fixed inset-0 z-50">
-          {/* backdrop */}
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={closePreview}
-            aria-hidden
-          />
-          {/* panel */}
+          <div className="absolute inset-0 bg-black/40" onClick={closePreview} aria-hidden />
           <div className="absolute inset-x-0 top-12 mx-auto max-w-lg w-[92%]">
             <div className="bg-white border rounded-2xl shadow-xl p-5">
               <div className="flex items-start justify-between">
@@ -377,39 +365,23 @@ export default function NewJobPage() {
                     <div className="w-16 h-16 rounded-full overflow-hidden border bg-gray-50 shrink-0">
                       {preview.avatar_url ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={preview.avatar_url}
-                          alt="Avatar"
-                          className="w-full h-full object-cover"
-                        />
+                        <img src={preview.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
                       ) : (
-                        <div className="w-full h-full grid place-items-center text-xs opacity-60">
-                          No photo
-                        </div>
+                        <div className="w-full h-full grid place-items-center text-xs opacity-60">No photo</div>
                       )}
                     </div>
                     <div>
                       <div className="font-medium">{preview.full_name ?? "Unnamed Teacher"}</div>
                       <div className="text-sm opacity-80">{preview.email ?? preview.id}</div>
-                      {preview.county && (
-                        <div className="text-sm opacity-80">County: {preview.county}</div>
-                      )}
+                      {preview.county && (<div className="text-sm opacity-80">County: {preview.county}</div>)}
                     </div>
                   </div>
 
                   <div className="flex gap-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={selectFromPreview}
-                      className="border rounded px-3 py-2 text-sm font-medium hover:bg-gray-50"
-                    >
+                    <button type="button" onClick={selectFromPreview} className="border rounded px-3 py-2 text-sm font-medium hover:bg-gray-50">
                       Select for booking
                     </button>
-                    <button
-                      type="button"
-                      onClick={closePreview}
-                      className="underline text-sm"
-                    >
+                    <button type="button" onClick={closePreview} className="underline text-sm">
                       Cancel
                     </button>
                   </div>
@@ -424,5 +396,13 @@ export default function NewJobPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function NewJobPage() {
+  return (
+    <RoleGate want="principal" loginPath="/principal/login">
+      <NewJobInner />
+    </RoleGate>
   );
 }

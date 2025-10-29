@@ -1,7 +1,12 @@
+// apps/web/src/app/principal/teachers/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+// If your alias is set up:
+import RoleGate from "@/app/RoleGate";
+// If not, use the relative path instead:
+// import RoleGate from "../../RoleGate";
 import { createClientBrowser } from "@/lib/supabaseClient";
 
 type Teacher = {
@@ -15,7 +20,7 @@ type Teacher = {
   qualifications_url: string | null;
 };
 
-export default function PrincipalTeachersPage() {
+function PrincipalTeachersInner() {
   const supabase = createClientBrowser();
 
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -29,28 +34,17 @@ export default function PrincipalTeachersPage() {
       setErr(null);
 
       const { data: session } = await supabase.auth.getSession();
-      const me = session.session?.user?.id;
-      if (!me) { window.location.href = "/login"; return; }
+      if (!session.session) {
+        // RoleGate will redirect; just stop loading.
+        setLoading(false);
+        return;
+      }
 
-      // Read ALL teacher details inline (requires RLS policy below)
-      const { data, error } = await supabase
-        .from("profiles")
-        .select(`
-          id,
-          full_name,
-          email,
-          avatar_url,
-          county,
-          phone_number,
-          teaching_council_number,
-          qualifications_url
-        `)
-        .eq("role", "teacher")
-        .order("full_name", { ascending: true, nullsFirst: true })
-        .order("email", { ascending: true, nullsFirst: true });
+      // ✅ STEP 2: fetch teachers via RPC (principal-gated, bypasses RLS safely)
+      const { data, error } = await supabase.rpc("get_teachers_for_principal");
 
       if (error) {
-        console.error("profiles select error:", error);
+        console.error("get_teachers_for_principal error:", error);
         setErr(error.message);
         setTeachers([]);
       } else {
@@ -64,7 +58,7 @@ export default function PrincipalTeachersPage() {
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return teachers;
-    return teachers.filter(t =>
+    return teachers.filter((t) =>
       (t.full_name ?? "").toLowerCase().includes(needle) ||
       (t.email ?? "").toLowerCase().includes(needle) ||
       (t.county ?? "").toLowerCase().includes(needle) ||
@@ -75,7 +69,7 @@ export default function PrincipalTeachersPage() {
 
   const displayName = (t: Teacher) => {
     if (t.full_name && t.full_name.trim()) return t.full_name;
-    if (t.email) return t.email.split("@")[0]; // fallback to local-part
+    if (t.email) return t.email.split("@")[0];
     return "Unnamed Teacher";
   };
 
@@ -115,14 +109,16 @@ export default function PrincipalTeachersPage() {
         <p className="opacity-70">No teachers found.</p>
       ) : (
         <ul className="grid gap-4 sm:grid-cols-2">
-          {filtered.map(t => (
+          {filtered.map((t) => (
             <li key={t.id} className="border rounded-2xl p-4 flex gap-4">
               <div className="w-16 h-16 rounded-full overflow-hidden border bg-gray-50 shrink-0">
                 {t.avatar_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={t.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
                 ) : (
-                  <div className="w-full h-full grid place-items-center text-xs opacity-60">No photo</div>
+                  <div className="w-full h-full grid place-items-center text-xs opacity-60">
+                    No photo
+                  </div>
                 )}
               </div>
 
@@ -157,7 +153,7 @@ export default function PrincipalTeachersPage() {
                     Start booking
                   </Link>
                   {t.email && (
-                    <a href={`mailto:${t.email}`} className="underline text-sm">
+                    <a href={`mailto:${t.email}`} className="underline text-sm" title="Email teacher">
                       Email
                     </a>
                   )}
@@ -168,5 +164,13 @@ export default function PrincipalTeachersPage() {
         </ul>
       )}
     </div>
+  );
+}
+
+export default function PrincipalTeachersPage() {
+  return (
+    <RoleGate want="principal" loginPath="/principal/login">
+      <PrincipalTeachersInner />
+    </RoleGate>
   );
 }
