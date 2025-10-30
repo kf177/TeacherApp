@@ -1,408 +1,330 @@
-// C:\Projects\TeacherApp\apps\web\src\app\jobs\new\page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClientBrowser } from "@/lib/supabaseClient";
-import { useSearchParams } from "next/navigation";
-import RoleGate from "@/app/RoleGate"; // gate for principal
+import { DateRange, DayPicker } from "react-day-picker";
+import "react-day-picker/style.css";
+import { format } from "date-fns";
+const pretty = (d?: Date) => (d ? format(d, "d MMMM yyyy") : "");
+import { before } from "node:test";
 
-type Profile = {
-  id: string;
-  full_name: string | null;
-  email: string | null;
-  role?: string | null;
-};
+type PerDay = { date: string; available: boolean };
 
-type PublicTeacher = {
-  id: string;
+type Teacher = {
+  teacher_id?: string; // from RPC v2
+  id?: string;         // from fallback profiles query
   full_name: string | null;
   email: string | null;
   avatar_url: string | null;
   county: string | null;
+  per_day?: PerDay[];  // present only when dates are selected (RPC v2)
 };
 
-function NewJobInner() {
+type JobStatus = "open" | "requested" | "accepted" | "cancelled";
+
+export default function NewJobPage() {
   const supabase = createClientBrowser();
-  const searchParams = useSearchParams();
+  const router = useRouter();
 
-  const preSelectedTeacher =
-    searchParams.get("teacherId") ?? searchParams.get("subId") ?? "";
+  // --- Job form state ---
+  const [title, setTitle] = useState("");
+  const [school, setSchool] = useState("");
+  const [notes, setNotes] = useState("");
 
-  const [teachers, setTeachers] = useState<Profile[]>([]);
-  const [teachersQuery, setTeachersQuery] = useState("");
-  const [loadingTeachers, setLoadingTeachers] = useState(true);
+  // We’ll keep your string dates but drive them from the calendar
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
+
+  // Calendar (range) state
+  const [range, setRange] = useState<DateRange | undefined>();
+
+  const [selectedTeacherId, setSelectedTeacherId] = useState<string | null>(null);
+
+  // --- UI state ---
+  const [loadingTeachers, setLoadingTeachers] = useState(false);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [teachersError, setTeachersError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({
-    title: "",
-    school: "",
-    notes: "",
-    start_date: "",
-    end_date: "",
-    requested_teacher: preSelectedTeacher,
-  });
-
-  // Modal state (profile preview)
-  const [previewId, setPreviewId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PublicTeacher | null>(null);
-  const [loadingPreview, setLoadingPreview] = useState(false);
-  const [previewErr, setPreviewErr] = useState<string | null>(null);
-
+  // Sync calendar -> string dates (yyyy-MM-dd) that your existing logic expects
   useEffect(() => {
-    if (preSelectedTeacher && !form.requested_teacher) {
-      setForm((f) => ({ ...f, requested_teacher: preSelectedTeacher }));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preSelectedTeacher]);
+    const toStr = (d: Date | undefined) => (d ? format(d, "yyyy-MM-dd") : "");
+    setStartDate(toStr(range?.from));
+    setEndDate(toStr(range?.to ?? range?.from)); // single day if only from selected
+  }, [range?.from, range?.to]);
 
-  // Load teachers via RPC (principal-safe)
+  // Normalize the date range for queries
+  const normalizedRange = useMemo(() => {
+    if (!startDate && !endDate) return null;
+    if (startDate && !endDate) return { start: startDate, end: startDate };
+    if (!startDate && endDate) return { start: endDate, end: endDate };
+    const s = new Date(startDate);
+    const e = new Date(endDate);
+    if (e < s) return { start: endDate, end: endDate };
+    return { start: startDate, end: endDate };
+  }, [startDate, endDate]);
+
+  const getTeacherId = (t: Teacher) => t.teacher_id ?? t.id ?? "";
+
+  // Load teachers (RPC when dates picked; fallback to all)
   useEffect(() => {
-    (async () => {
+    let mounted = true;
+    const load = async () => {
       setLoadingTeachers(true);
       setTeachersError(null);
-
-      const { data: session } = await supabase.auth.getSession();
-      const user = session.session?.user;
-      if (!user) {
-        window.location.href = "/principal/login";
-        return;
+      setSelectedTeacherId(null);
+      try {
+        if (normalizedRange?.start && normalizedRange?.end) {
+          const { data, error } = await supabase.rpc("rpc_available_teachers_v2", {
+            _start: normalizedRange.start,
+            _end: normalizedRange.end,
+          });
+          if (error) throw error;
+          if (!mounted) return;
+          setTeachers((data ?? []) as Teacher[]);
+          setInfo((data ?? []).length === 0 ? "No teachers marked available for the selected dates." : null);
+        } else {
+          const { data, error } = await supabase
+            .from("profiles")
+            .select("id, full_name, email, avatar_url, county, role")
+            .eq("role", "teacher")
+            .order("full_name", { ascending: true });
+          if (error) throw error;
+          if (!mounted) return;
+          setTeachers(
+            (data ?? []).map((p: any) => ({
+              id: p.id,
+              full_name: p.full_name,
+              email: p.email,
+              avatar_url: p.avatar_url,
+              county: p.county,
+            }))
+          );
+          setInfo("Choose dates on the calendar to filter this list to only available teachers.");
+        }
+      } catch (e: any) {
+        if (!mounted) return;
+        setTeachersError(e?.message ?? "Failed to load teachers");
+      } finally {
+        if (mounted) setLoadingTeachers(false);
       }
+    };
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, [supabase, normalizedRange?.start, normalizedRange?.end]);
 
-      const { data, error } = await supabase.rpc("get_teachers_for_principal");
-      if (error) {
-        console.error("get_teachers_for_principal error:", error);
-        setTeachersError(error.message);
-        setTeachers([]);
-      } else {
-        const list = (data ?? []).filter((t: any) => t.id !== user.id);
-        setTeachers(list as Profile[]);
-      }
-      setLoadingTeachers(false);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const filteredTeachers = useMemo(() => {
-    const q = teachersQuery.trim().toLowerCase();
-    if (!q) return teachers;
-    return teachers.filter((t) => {
-      const name = (t.full_name ?? "").toLowerCase();
-      const email = (t.email ?? "").toLowerCase();
-      return name.includes(q) || email.includes(q);
-    });
-  }, [teachers, teachersQuery]);
-
-  // Preview panel (pull from a restricted view)
-  const openPreview = async (teacherId: string) => {
-    setPreviewId(teacherId);
-    setPreview(null);
-    setPreviewErr(null);
-    setLoadingPreview(true);
-
-    // Prefer privacy-safe view
-    let { data, error } = await supabase
-      .from("profiles_public")
-      .select("id, full_name, email, avatar_url, county")
-      .eq("id", teacherId)
-      .maybeSingle();
-
-    // Fallback: if view not present, read limited columns from profiles (requires policy)
-    if (error) {
-      const fb = await supabase
-        .from("profiles")
-        .select("id, full_name, email, avatar_url, county")
-        .eq("id", teacherId)
-        .maybeSingle();
-      data = fb.data;
-      error = fb.error || null;
-    }
-
-    if (error) {
-      console.error("teacher preview error:", error);
-      setPreviewErr(error.message);
-      setPreview(null);
-    } else if (data) {
-      setPreview(data as PublicTeacher);
-    } else {
-      setPreviewErr("Teacher not found.");
-    }
-
-    setLoadingPreview(false);
-  };
-
-  const closePreview = () => {
-    setPreviewId(null);
-    setPreview(null);
-    setPreviewErr(null);
-    setLoadingPreview(false);
-  };
-
-  const selectFromPreview = () => {
-    if (previewId) setForm((f) => ({ ...f, requested_teacher: previewId }));
-    closePreview();
-  };
-
-  const clearTeacher = () => {
-    setForm((f) => ({ ...f, requested_teacher: "" }));
-  };
-
-  const onSubmit = async (e: React.FormEvent) => {
+  // Create the job
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true);
+    if (submitting) return;
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    setSubmitError(null);
+    setInfo(null);
 
-    if (!user) {
-      alert("You must be logged in.");
-      setBusy(false);
-      return;
+    const hasDates = !!normalizedRange?.start && !!normalizedRange?.end;
+    if (!title.trim()) return setSubmitError("Please enter a job title.");
+    if (!hasDates) return setSubmitError("Please choose dates on the calendar.");
+    if (!selectedTeacherId) return setSubmitError("Please select a teacher.");
+
+    setSubmitting(true);
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const userId = sess?.session?.user?.id;
+      if (!userId) {
+        setSubmitting(false);
+        return setSubmitError("You must be signed in to create a job.");
+      }
+
+      const payload = {
+        id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        title: title.trim(),
+        school: school.trim() || null,
+        notes: notes.trim() || null,
+        created_by: userId,
+        start_date: normalizedRange!.start,
+        end_date: normalizedRange!.end,
+        requested_teacher: selectedTeacherId,
+        status: "open" as JobStatus,
+        created_at: new Date().toISOString(),
+      };
+
+      const { error: insertErr } = await supabase.from("jobs").insert(payload);
+      if (insertErr) throw insertErr;
+
+      router.replace(`/principal`);
+    } catch (e: any) {
+      setSubmitError(e?.message ?? "Failed to create job.");
+    } finally {
+      setSubmitting(false);
     }
-
-    const willRequest = !!form.requested_teacher;
-
-    const { error } = await supabase.from("jobs").insert({
-      title: form.title,
-      school: form.school || null,
-      notes: form.notes || null,
-      start_date: form.start_date || null,
-      end_date: form.end_date || null,
-      created_by: user.id,
-      requested_teacher: form.requested_teacher || null,
-      status: willRequest ? "requested" : "open",
-    });
-
-    setBusy(false);
-
-    if (error) {
-      alert("Error creating booking: " + error.message);
-    } else {
-      window.location.href = "/principal/bookings";
-    }
-  };
-
-  const SelectedTeacherBadge = () => {
-    if (!form.requested_teacher) return null;
-    const who = teachers.find((t) => t.id === form.requested_teacher);
-    if (!who) return null;
-    return (
-      <div className="flex items-center justify-between rounded-lg border p-2 text-sm">
-        <div>
-          <div className="font-medium">{who.full_name ?? "Unnamed Teacher"}</div>
-          <div className="opacity-80">{who.email ?? who.id}</div>
-        </div>
-        <button
-          type="button"
-          className="underline ml-3"
-          onClick={clearTeacher}
-          title="Remove selected teacher"
-        >
-          Clear
-        </button>
-      </div>
-    );
   };
 
   return (
-    <div className="min-h-screen p-4 md:p-6 max-w-6xl mx-auto">
+    <div className="min-h-screen py-6">
       <h1 className="text-2xl font-bold mb-4">Create New Booking</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Left: Booking form */}
-        <div className="md:col-span-2">
-          <form onSubmit={onSubmit} className="border rounded-xl p-6 space-y-3">
+        {/* Job form */}
+        <form onSubmit={handleCreate} className="md:col-span-2 border rounded-xl p-4 space-y-4">
+          <div>
             <label className="block text-sm font-medium">Title</label>
             <input
-              className="w-full border rounded p-2"
-              placeholder="e.g., 5th Class Cover"
-              value={form.title}
-              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="w-full border rounded p-2 bg-black/20"
+              placeholder="e.g. 3rd Class Cover"
               required
             />
+          </div>
 
+          <div>
             <label className="block text-sm font-medium">School</label>
             <input
-              className="w-full border rounded p-2"
-              placeholder="School"
-              value={form.school}
-              onChange={(e) => setForm({ ...form, school: e.target.value })}
+              value={school}
+              onChange={(e) => setSchool(e.target.value)}
+              className="w-full border rounded p-2 bg-black/20"
+              placeholder="e.g. St. Mary's NS"
             />
+          </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium">Start Date</label>
-                <input
-                  type="date"
-                  className="w-full border rounded p-2"
-                  value={form.start_date}
-                  onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium">End Date</label>
-                <input
-                  type="date"
-                  className="w-full border rounded p-2"
-                  value={form.end_date}
-                  onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-                  required
-                />
-              </div>
+          {/* Calendar date range picker */}
+          <div>
+            <label className="block text-sm font-medium mb-2">Dates</label>
+            <div className="border rounded-xl p-2 inline-block">
+              <DayPicker
+                mode="range"
+                selected={range}
+                onSelect={setRange}
+                numberOfMonths={2}
+                pagedNavigation
+                weekStartsOn={1} // Monday
+                disabled = {[
+                  {before: new Date()},
+                  {dayOfWeek: [0, 6]},
+                ]}
+              />
             </div>
-
-            <label className="block text-sm font-medium">Notes</label>
-            <textarea
-              className="w-full border rounded p-2"
-              placeholder="Notes (optional)"
-              rows={4}
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            />
-
-            <div className="space-y-2">
-              <div className="text-sm font-medium">Selected teacher (optional)</div>
-              <SelectedTeacherBadge />
-              {!form.requested_teacher && (
-                <p className="text-xs opacity-70">
-                  If none selected, the booking will be posted as <b>open</b>.
-                </p>
+            {/* Readout */}
+            <div className="text-xs opacity-70 mt-2">
+              {range && range.from ? (
+                <>Selected: {pretty(range.from)} → {pretty(range.to ?? range.from)}</>
+              ) : (
+                <>Pick a weekday or drag to select a range (Mon–Fri only)</>
               )}
             </div>
+          </div>
 
-            <div className="flex items-center gap-3 pt-2">
-              <button disabled={busy} className="border rounded p-2 px-4 font-medium">
-                {busy ? "Creating…" : "Create Booking"}
-              </button>
-              <a href="/principal" className="underline">Cancel</a>
-            </div>
-          </form>
-        </div>
+          <div>
+            <label className="block text-sm font-medium">Notes (optional)</label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className="w-full border rounded p-2 bg-black/20 min-h-[100px]"
+              placeholder="Anything the teacher should know…"
+            />
+          </div>
 
-        {/* Right: Teachers list / preview */}
-        <aside className="md:col-span-1 border rounded-xl p-4 h-fit">
+          {submitError && (
+            <div className="p-2 text-sm border rounded bg-red-50 text-red-900">{submitError}</div>
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting || !selectedTeacherId}
+            className="border rounded px-4 py-2 font-medium disabled:opacity-50"
+            title={!selectedTeacherId ? "Select a teacher from the list first" : "Create job"}
+          >
+            {submitting ? "Creating…" : "Create Booking"}
+          </button>
+        </form>
+
+        {/* Teacher selector */}
+        <aside className="md:col-span-1 border rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="font-semibold">Teachers</h2>
-            <div className="text-xs opacity-70">
-              {loadingTeachers ? "Loading…" : teachersError ? "Error" : null}
-            </div>
+            {normalizedRange ? (
+              <span className="text-xs opacity-70">
+                {normalizedRange.start} → {normalizedRange.end}
+              </span>
+            ) : (
+              <span className="text-xs opacity-70">All teachers</span>
+            )}
           </div>
 
           {teachersError && (
-            <div className="text-xs text-red-600 mb-2 break-words">
-              Failed to load teachers: {teachersError}
-            </div>
+            <div className="p-2 text-sm border rounded bg-red-50 text-red-900">{teachersError}</div>
+          )}
+          {info && !teachersError && (
+            <div className="p-2 text-xs border rounded bg-yellow-50 text-yellow-900 mb-2">{info}</div>
           )}
 
-          <div className="flex items-center gap-2 mb-3">
-            <input
-              className="w-full border rounded p-2"
-              placeholder="Search name or email…"
-              value={teachersQuery}
-              onChange={(e) => setTeachersQuery(e.target.value)}
-              disabled={loadingTeachers}
-            />
-            <a href="/principal/teachers" className="underline text-xs">View all</a>
-          </div>
+          {loadingTeachers ? (
+            <div className="text-sm opacity-70">Loading teachers…</div>
+          ) : teachers.length === 0 ? (
+            <div className="text-sm opacity-70">No teachers to show.</div>
+          ) : (
+            <ul className="space-y-2 max-h-[520px] overflow-auto pr-1">
+              {teachers.map((t) => {
+                const id = getTeacherId(t);
+                const selected = id === selectedTeacherId;
+                return (
+                  <li
+                    key={id}
+                    className={`flex items-center gap-3 border rounded-lg p-2 cursor-pointer ${
+                      selected ? "ring-2 ring-blue-500" : ""
+                    }`}
+                    onClick={() => setSelectedTeacherId(id)}
+                    title="Select this teacher"
+                  >
+                    <img
+                      src={t.avatar_url || "/favicon.ico"}
+                      alt={t.full_name || "Teacher"}
+                      className="w-9 h-9 rounded-full object-cover"
+                    />
 
-          <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
-            {loadingTeachers ? (
-              <div className="text-sm opacity-70">Loading teachers…</div>
-            ) : filteredTeachers.length === 0 ? (
-              <div className="text-sm opacity-70">No matching teachers.</div>
-            ) : (
-              filteredTeachers.map((t) => (
-                <div key={t.id} className="border rounded-lg p-2">
-                  <div className="font-medium text-sm">
-                    {t.full_name ?? "Unnamed Teacher"}
-                  </div>
-                  <div className="text-xs opacity-80">{t.email ?? t.id}</div>
-                  <div className="flex gap-2 mt-2">
-                    <button
-                      type="button"
-                      onClick={() => openPreview(t.id)}
-                      className="border rounded px-2 py-1 text-xs hover:bg-gray-50"
-                      title="Preview profile"
-                    >
-                      Preview
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setForm((f) => ({ ...f, requested_teacher: t.id }))}
-                      className="border rounded px-2 py-1 text-xs hover:bg-gray-50"
-                      title="Select this teacher"
-                    >
-                      Select
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </aside>
-      </div>
+                    <div className="flex-1 text-left">
+                      <div className="text-sm font-medium">
+                        {t.full_name || "Unnamed Teacher"}
+                      </div>
+                      <div className="text-xs opacity-70">
+                        {t.email || "—"} {t.county ? `· ${t.county}` : ""}
+                      </div>
 
-      {/* Modal: Teacher profile preview */}
-      {previewId && (
-        <div className="fixed inset-0 z-50">
-          <div className="absolute inset-0 bg-black/40" onClick={closePreview} aria-hidden />
-          <div className="absolute inset-x-0 top-12 mx-auto max-w-lg w-[92%]">
-            <div className="bg-white border rounded-2xl shadow-xl p-5">
-              <div className="flex items-start justify-between">
-                <h3 className="text-lg font-semibold">Teacher profile</h3>
-                <button onClick={closePreview} className="text-sm underline">Close</button>
-              </div>
-
-              {loadingPreview ? (
-                <div className="py-10 text-center opacity-70">Loading…</div>
-              ) : previewErr ? (
-                <div className="py-6 text-red-600 text-sm">Failed to load: {previewErr}</div>
-              ) : preview ? (
-                <div className="mt-3 space-y-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-16 h-16 rounded-full overflow-hidden border bg-gray-50 shrink-0">
-                      {preview.avatar_url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={preview.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full grid place-items-center text-xs opacity-60">No photo</div>
+                      {/* Per-day availability badges (only when dates are selected) */}
+                      {t.per_day && t.per_day.length > 0 && (
+                        <div className="flex gap-1 mt-1">
+                          {t.per_day.map((pd) => (
+                            <span
+                              key={pd.date}
+                              title={`${pd.date} — ${pd.available ? "Available" : "Not available"}`}
+                              className={`inline-flex items-center justify-center text-[10px] w-5 h-5 rounded ${
+                                pd.available ? "border" : "border bg-red-600/20"
+                              }`}
+                            >
+                              {pd.available ? "✓" : "×"}
+                            </span>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    <div>
-                      <div className="font-medium">{preview.full_name ?? "Unnamed Teacher"}</div>
-                      <div className="text-sm opacity-80">{preview.email ?? preview.id}</div>
-                      {preview.county && (<div className="text-sm opacity-80">County: {preview.county}</div>)}
-                    </div>
-                  </div>
 
-                  <div className="flex gap-3 pt-1">
-                    <button type="button" onClick={selectFromPreview} className="border rounded px-3 py-2 text-sm font-medium hover:bg-gray-50">
-                      Select for booking
-                    </button>
-                    <button type="button" onClick={closePreview} className="underline text-sm">
-                      Cancel
-                    </button>
-                  </div>
-
-                  <p className="text-xs opacity-60">
-                    Note: Full details (phone, TCN, qualifications) are private to the teacher and not shown here.
-                  </p>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      )}
+                    {selected ? (
+                      <span className="text-xs px-2 py-1 border rounded">Selected</span>
+                    ) : (
+                      <span className="text-xs px-2 py-1 border rounded">Choose</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </aside>
+      </div>
     </div>
-  );
-}
-
-export default function NewJobPage() {
-  return (
-    <RoleGate want="principal" loginPath="/principal/login">
-      <NewJobInner />
-    </RoleGate>
   );
 }
