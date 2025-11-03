@@ -11,21 +11,46 @@ function TeacherInner() {
       <header className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Teacher — Home</h1>
         <nav className="flex gap-4 text-sm">
-          <Link href="/teacher/dashboard" className="underline">Dashboard</Link>
-          <Link href="/teacher/availability" className="underline">Availability</Link>
-          <Link href="/teacher/profile" className="underline">Profile</Link>
+          <Link href="/teacher/dashboard" className="underline">
+            Dashboard
+          </Link>
+          <Link href="/teacher/availability" className="underline">
+            Availability
+          </Link>
+          <Link href="/teacher/profile" className="underline">
+            Profile
+          </Link>
         </nav>
       </header>
 
       <div className="grid sm:grid-cols-2 gap-4">
-        <Link href="/teacher/availability" className="block border rounded-xl p-6 hover:shadow-sm">
+        {/* Set availability */}
+        <Link
+          href="/teacher/availability"
+          className="block border rounded-xl p-6 hover:shadow-sm"
+        >
           <h2 className="font-semibold text-lg">Set availability</h2>
           <p className="opacity-70 text-sm mt-1">
             Mark which days you’re available for the next two weeks.
           </p>
         </Link>
 
-        <Link href="/teacher/profile" className="block border rounded-xl p-6 hover:shadow-sm">
+        {/* Review requests */}
+        <Link
+          href="/teacher/requests"
+          className="block border rounded-xl p-6 hover:shadow-sm"
+        >
+          <h2 className="font-semibold text-lg">Review requests</h2>
+          <p className="opacity-70 text-sm mt-1">
+            View booking requests from principals and accept or decline them.
+          </p>
+        </Link>
+
+        {/* Update profile stays last */}
+        <Link
+          href="/teacher/profile"
+          className="block border rounded-xl p-6 hover:shadow-sm"
+        >
           <h2 className="font-semibold text-lg">Update profile</h2>
           <p className="opacity-70 text-sm mt-1">
             Name, phone, county, Teaching Council Number, and uploads.
@@ -38,7 +63,7 @@ function TeacherInner() {
 
 export default function TeacherPage() {
   return (
-    <RoleGate want="teacher" loginPath="/teacher/login" /* debug */>
+    <RoleGate want="teacher" loginPath="/teacher/login">
       {/* <ProfileSync /> */}
       <TeacherInner />
     </RoleGate>

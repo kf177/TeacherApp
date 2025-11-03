@@ -1,4 +1,5 @@
-// apps/web/src/app/principal/bookings/page.tsx
+// File: C:\Projects\TeacherApp\apps\web\src\app\principal\bookings\page.tsx
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -12,9 +13,8 @@ type Job = {
   school: string | null;
   start_date: string | null;
   end_date: string | null;
-  status: "open" | "requested" | "accepted" | string | null;
-  requested_teacher?: string | null; // new
-  requested_sub?: string | null;     // legacy (fallback)
+  status: "open" | "requested" | "accepted" | "declined" | string | null;
+  requested_teacher: string | null; // aliased from requested_sub
   accepted_by: string | null;
 };
 
@@ -27,7 +27,7 @@ type Profile = {
 function formatDate(dateString: string | null) {
   if (!dateString) return "";
   const d = new Date(dateString);
-  if (Number.isNaN(d.getTime())) return dateString; // show raw if invalid
+  if (Number.isNaN(d.getTime())) return dateString;
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
@@ -40,6 +40,8 @@ function StatusPill({ status }: { status: Job["status"] }) {
       ? "bg-amber-100 text-amber-800 border-amber-200"
       : s === "open"
       ? "bg-blue-100 text-blue-800 border-blue-200"
+      : s === "declined"
+      ? "bg-rose-100 text-rose-800 border-rose-200"
       : "bg-gray-100 text-gray-800 border-gray-200";
   const label = s ? s[0].toUpperCase() + s.slice(1) : "Unknown";
   return (
@@ -67,15 +69,14 @@ function PrincipalBookingsInner() {
         return;
       }
 
-      // Load relevant jobs (open/requested/accepted), upcoming or ongoing only
       const todayISO = new Date().toISOString().slice(0, 10);
 
       const { data, error } = await supabase
         .from("jobs")
         .select(
-          "id,title,school,start_date,end_date,status,requested_teacher,requested_sub,accepted_by"
+          "id,title,school,start_date,end_date,status,requested_teacher:requested_sub,accepted_by"
         )
-        .or("status.eq.open,status.eq.requested,status.eq.accepted")
+        .or("status.eq.open,status.eq.requested,status.eq.accepted,status.eq.declined")
         .order("start_date", { ascending: true });
 
       if (error) {
@@ -87,7 +88,7 @@ function PrincipalBookingsInner() {
 
       const rows = (data ?? []) as Job[];
 
-      // Compute upcoming/current
+      // only upcoming/ongoing
       const upcoming = rows.filter((j) => {
         const ed = j.end_date ?? j.start_date ?? "";
         return ed >= todayISO;
@@ -95,11 +96,10 @@ function PrincipalBookingsInner() {
 
       setJobs(upcoming);
 
-      // Collect unique IDs for requested + accepted teachers
+      // collect profile ids
       const ids = new Set<string>();
       for (const j of upcoming) {
-        const reqId = (j.requested_teacher ?? j.requested_sub) || null;
-        if (reqId) ids.add(reqId);
+        if (j.requested_teacher) ids.add(j.requested_teacher);
         if (j.accepted_by) ids.add(j.accepted_by);
       }
 
@@ -114,7 +114,6 @@ function PrincipalBookingsInner() {
           for (const p of profs as Profile[]) map[p.id] = p;
           setProfilesMap(map);
         } else if (pErr) {
-          // Non-fatal; we'll show raw ids
           setErr((e) => e ?? `Profiles lookup failed: ${pErr.message}`);
         }
       }
@@ -149,8 +148,7 @@ function PrincipalBookingsInner() {
       ) : (
         <ul className="grid gap-3">
           {jobs.map((j) => {
-            const requestedId = j.requested_teacher ?? j.requested_sub ?? null;
-            const requested = requestedId ? profilesMap[requestedId] : undefined;
+            const requested = j.requested_teacher ? profilesMap[j.requested_teacher] : undefined;
             const accepted = j.accepted_by ? profilesMap[j.accepted_by] : undefined;
 
             return (
@@ -162,9 +160,7 @@ function PrincipalBookingsInner() {
                       <StatusPill status={j.status} />
                     </div>
 
-                    {j.school && (
-                      <div className="text-sm opacity-80">🏫 {j.school}</div>
-                    )}
+                    {j.school && <div className="text-sm opacity-80">🏫 {j.school}</div>}
 
                     {j.start_date && (
                       <div className="text-sm opacity-80">
@@ -176,12 +172,12 @@ function PrincipalBookingsInner() {
                     )}
 
                     {/* Requested teacher (if any) */}
-                    {requestedId && (
+                    {j.requested_teacher && (
                       <div className="text-sm opacity-80">
                         👤 Requested:{" "}
                         {requested
                           ? requested.full_name ?? requested.email ?? requested.id
-                          : requestedId}
+                          : j.requested_teacher}
                       </div>
                     )}
 
@@ -192,6 +188,16 @@ function PrincipalBookingsInner() {
                         {accepted
                           ? accepted.full_name ?? accepted.email ?? accepted.id
                           : j.accepted_by}
+                      </div>
+                    )}
+
+                    {/* Declined by (if applicable) */}
+                    {j.status?.toLowerCase() === "declined" && j.requested_teacher && (
+                      <div className="text-sm opacity-80">
+                        ❌ Declined by:{" "}
+                        {requested
+                          ? requested.full_name ?? requested.email ?? requested.id
+                          : j.requested_teacher}
                       </div>
                     )}
                   </div>

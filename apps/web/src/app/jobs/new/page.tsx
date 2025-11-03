@@ -1,3 +1,5 @@
+// File: C:\Projects\TeacherApp\apps\web\src\app\jobs\new\page.tsx
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -6,8 +8,8 @@ import { createClientBrowser } from "@/lib/supabaseClient";
 import { DateRange, DayPicker } from "react-day-picker";
 import "react-day-picker/style.css";
 import { format } from "date-fns";
+
 const pretty = (d?: Date) => (d ? format(d, "d MMMM yyyy") : "");
-import { before } from "node:test";
 
 type PerDay = { date: string; available: boolean };
 
@@ -148,8 +150,13 @@ export default function NewJobPage() {
         created_by: userId,
         start_date: normalizedRange!.start,
         end_date: normalizedRange!.end,
-        requested_teacher: selectedTeacherId,
-        status: "open" as JobStatus,
+
+        // Keep DB column as requested_sub for now (teacher-selected)
+        requested_sub: selectedTeacherId,
+
+        // If a teacher is selected, mark as requested; else open
+        status: (selectedTeacherId ? "requested" : "open") as JobStatus,
+
         created_at: new Date().toISOString(),
       };
 
@@ -176,7 +183,7 @@ export default function NewJobPage() {
             <input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full border rounded p-2 bg-black/20"
+              className="w-full border rounded p-2"
               placeholder="e.g. 3rd Class Cover"
               required
             />
@@ -187,7 +194,7 @@ export default function NewJobPage() {
             <input
               value={school}
               onChange={(e) => setSchool(e.target.value)}
-              className="w-full border rounded p-2 bg-black/20"
+              className="w-full border rounded p-2"
               placeholder="e.g. St. Mary's NS"
             />
           </div>
@@ -203,9 +210,9 @@ export default function NewJobPage() {
                 numberOfMonths={2}
                 pagedNavigation
                 weekStartsOn={1} // Monday
-                disabled = {[
-                  {before: new Date()},
-                  {dayOfWeek: [0, 6]},
+                disabled={[
+                  { before: new Date() },
+                  { dayOfWeek: [0, 6] },
                 ]}
               />
             </div>
@@ -224,7 +231,7 @@ export default function NewJobPage() {
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              className="w-full border rounded p-2 bg-black/20 min-h-[100px]"
+              className="w-full border rounded p-2 min-h-[100px]"
               placeholder="Anything the teacher should know…"
             />
           </div>
@@ -281,6 +288,7 @@ export default function NewJobPage() {
                     onClick={() => setSelectedTeacherId(id)}
                     title="Select this teacher"
                   >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={t.avatar_url || "/favicon.ico"}
                       alt={t.full_name || "Teacher"}

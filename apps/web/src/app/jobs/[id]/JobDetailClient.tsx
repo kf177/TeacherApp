@@ -1,3 +1,5 @@
+// File: C:\Projects\TeacherApp\apps\web\src\app\jobs\JobDetailClient.tsx
+
 "use client";
 import { useEffect, useState } from "react";
 import { createClientBrowser } from "@/lib/supabaseClient";
@@ -12,7 +14,7 @@ type Job = {
   status: string | null;
   created_by: string | null;
   accepted_by: string | null;
-  requested_sub: string | null;
+  requested_teacher: string | null; // ← aliased from requested_sub
   created_at: string;
 };
 
@@ -38,24 +40,25 @@ export default function JobDetailClient({ id }: { id: string }) {
       }
       setUserId(session.session.user.id);
 
-      // Fetch job first
+      // 👇 use PostgREST alias syntax columnAlias:real_column
       const { data, error } = await supabase
         .from("jobs")
-        .select("*")
+        .select(
+          "id,title,school,notes,start_date,end_date,status,created_by,accepted_by,requested_teacher:requested_sub,created_at"
+        )
         .eq("id", id)
         .single();
 
       if (!error && data) {
-        setJob(data as Job);
+        const j = data as Job;
+        setJob(j);
 
-        // If a requested_sub exists, fetch their profile to show name/email
-        if (data.requested_sub) {
+        if (j.requested_teacher) {
           const { data: prof } = await supabase
             .from("profiles")
             .select("id, full_name, email")
-            .eq("id", data.requested_sub)
+            .eq("id", j.requested_teacher)
             .maybeSingle();
-
           if (prof) setRequested(prof as Profile);
         }
       }
@@ -68,7 +71,8 @@ export default function JobDetailClient({ id }: { id: string }) {
     const { error } = await supabase
       .from("jobs")
       .update({ status: "accepted", accepted_by: userId })
-      .eq("id", job.id);
+      .eq("id", job.id)
+      .eq("requested_sub", userId); // guard: only if requested for this teacher
 
     if (error) alert("Error accepting job: " + error.message);
     else {
@@ -128,7 +132,6 @@ export default function JobDetailClient({ id }: { id: string }) {
 
       <h1 className="text-2xl font-bold">{job.title}</h1>
 
-      {/* Dates */}
       {job.start_date && (
         <p className="opacity-80">
           📅{" "}
@@ -138,48 +141,33 @@ export default function JobDetailClient({ id }: { id: string }) {
         </p>
       )}
 
-      {/* School */}
       {job.school && <p className="opacity-80">🏫 School: {job.school}</p>}
 
-      {/* Requested sub (only when requested_sub present) */}
-      {job.requested_sub && (
+      {job.requested_teacher && (
         <p className="opacity-80">
           👤 Requested for:{" "}
-          {requested
-            ? requested.full_name ?? requested.email ?? requested.id
-            : job.requested_sub}
+          {requested ? requested.full_name ?? requested.email ?? requested.id : job.requested_teacher}
         </p>
       )}
 
-      {/* Notes */}
       {job.notes && <p className="mt-2 whitespace-pre-wrap">{job.notes}</p>}
 
-      {/* Status */}
-      <p className="text-xs opacity-60 mt-4">
-        Status: {job.status?.toUpperCase() ?? "UNKNOWN"}
-      </p>
+      <p className="text-xs opacity-60 mt-4">Status: {job.status?.toUpperCase() ?? "UNKNOWN"}</p>
 
-      {/* Actions */}
       <div className="flex gap-3 mt-6 flex-wrap">
         {isCreator && (
           <>
             <a href={`/jobs/${job.id}/edit`} className="underline text-sm font-medium">
               Edit
             </a>
-            <button
-              onClick={handleDelete}
-              className="underline text-sm font-medium text-red-600"
-            >
+            <button onClick={handleDelete} className="underline text-sm font-medium text-red-600">
               Delete
             </button>
           </>
         )}
 
         {!isCreator && job.status === "open" && (
-          <button
-            onClick={handleAccept}
-            className="border rounded p-2 px-4 font-medium hover:bg-gray-50"
-          >
+          <button onClick={handleAccept} className="border rounded p-2 px-4 font-medium hover:bg-gray-50">
             Accept Job
           </button>
         )}
