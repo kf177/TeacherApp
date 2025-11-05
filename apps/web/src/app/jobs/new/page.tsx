@@ -121,55 +121,98 @@ export default function NewJobPage() {
   }, [supabase, normalizedRange?.start, normalizedRange?.end]);
 
   // Create the job
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (submitting) return;
+  // File: C:\Projects\TeacherApp\apps\web\src\app\jobs\new\page.tsx
 
-    setSubmitError(null);
-    setInfo(null);
+// File: C:\Projects\TeacherApp\apps\web\src\app\jobs\new\page.tsx
 
-    const hasDates = !!normalizedRange?.start && !!normalizedRange?.end;
-    if (!title.trim()) return setSubmitError("Please enter a job title.");
-    if (!hasDates) return setSubmitError("Please choose dates on the calendar.");
-    if (!selectedTeacherId) return setSubmitError("Please select a teacher.");
+const handleCreate = async (e: React.FormEvent) => {
+  e.preventDefault();
+  if (submitting) return;
 
-    setSubmitting(true);
-    try {
-      const { data: sess } = await supabase.auth.getSession();
-      const userId = sess?.session?.user?.id;
-      if (!userId) {
-        setSubmitting(false);
-        return setSubmitError("You must be signed in to create a job.");
-      }
+  setSubmitError(null);
+  setInfo(null);
 
-      const payload = {
-        id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
-        title: title.trim(),
-        school: school.trim() || null,
-        notes: notes.trim() || null,
-        created_by: userId,
-        start_date: normalizedRange!.start,
-        end_date: normalizedRange!.end,
+  const hasDates = !!normalizedRange?.start && !!normalizedRange?.end;
+  if (!title.trim()) return setSubmitError("Please enter a job title.");
+  if (!hasDates) return setSubmitError("Please choose dates on the calendar.");
+  if (!selectedTeacherId) return setSubmitError("Please select a teacher.");
 
-        // Keep DB column as requested_sub for now (teacher-selected)
-        requested_sub: selectedTeacherId,
-
-        // If a teacher is selected, mark as requested; else open
-        status: (selectedTeacherId ? "requested" : "open") as JobStatus,
-
-        created_at: new Date().toISOString(),
-      };
-
-      const { error: insertErr } = await supabase.from("jobs").insert(payload);
-      if (insertErr) throw insertErr;
-
-      router.replace(`/principal`);
-    } catch (e: any) {
-      setSubmitError(e?.message ?? "Failed to create job.");
-    } finally {
+  setSubmitting(true);
+  try {
+    const { data: sess } = await supabase.auth.getSession();
+    const userId = sess?.session?.user?.id;
+    if (!userId) {
       setSubmitting(false);
+      return setSubmitError("You must be signed in to create a job.");
     }
-  };
+
+    const payload = {
+      id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      title: title.trim(),
+      school: school.trim() || null,
+      notes: notes.trim() || null,
+      created_by: userId,
+      start_date: normalizedRange!.start,
+      end_date: normalizedRange!.end,
+
+      // Keep DB column as requested_sub for now (teacher-selected)
+      requested_sub: selectedTeacherId,
+
+      // If a teacher is selected, mark as requested; else open
+      status: (selectedTeacherId ? "requested" : "open") as JobStatus,
+
+      created_at: new Date().toISOString(),
+    };
+
+    // 1) Create the job
+    const { error: insertErr } = await supabase.from("jobs").insert(payload);
+    if (insertErr) throw insertErr;
+
+    // 2) Create an in-app notification for the selected teacher (non-blocking)
+    // 3) Email notification (server-side) — call our API route (no email needed)
+try {
+  if (selectedTeacherId) {
+    const accessToken = sess?.session?.access_token;
+
+    const res = await fetch("/api/notify-job-request", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      body: JSON.stringify({
+        teacherId: selectedTeacherId,
+        job: {
+          id: payload.id,
+          title: payload.title,
+          school: payload.school,
+          start_date: payload.start_date,
+          end_date: payload.end_date,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      console.warn("Email notify failed:", j?.error || res.statusText);
+    }
+  }
+} catch (mailErr) {
+  console.warn("Email notify error:", mailErr);
+}
+
+
+// 4) Navigate back to principal home
+router.replace(`/principal`);
+
+  } catch (e: any) {
+    setSubmitError(e?.message ?? "Failed to create job.");
+  } finally {
+    setSubmitting(false);
+  }
+};
+
+
 
   return (
     <div className="min-h-screen py-6">
